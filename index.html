@@ -1186,8 +1186,29 @@ function exportToExcel(){
   const rows = [];
   state.receipts.forEach(r => {
     const c = computeCombosFromItems(r.items);
+    // Skip this receipt entirely if it doesn't qualify for either combo
+    // (e.g. a receipt with only a cake and nothing else).
+    if (!c.cakeTopper && !c.cakePastries) return;
+
     r.items.forEach(it => {
       const cat = it.categoryId ? categoryById(it.categoryId) : null;
+      const role = cat ? cat.role : null;
+
+      // Only export rows that are actually part of a qualifying combo on
+      // THIS receipt. A cake row counts if either combo is present; a
+      // topper row only counts if Cake+Topper qualified; a pastries row
+      // only counts if Cake+Pastries qualified. Everything else on the
+      // receipt (drinks, boxes, unrelated items, etc.) is left out.
+      const include =
+        (role === 'cake' && (c.cakeTopper || c.cakePastries)) ||
+        (role === 'topper' && c.cakeTopper) ||
+        (role === 'pastries' && c.cakePastries);
+      if (!include) return;
+
+      const comboType = (c.cakeTopper && c.cakePastries)
+        ? 'Cake+Topper & Cake+Pastries'
+        : c.cakeTopper ? 'Cake+Topper' : 'Cake+Pastries';
+
       rows.push({
         'Receipt Number': r.number,
         'Receipt Date': r.date,
@@ -1196,6 +1217,7 @@ function exportToExcel(){
         'Quantity': it.qty,
         'Unit Price': it.unitPrice,
         'Product Total': it.total,
+        'Combo Type': comboType,
         'Cake + Topper Total (receipt)': c.cakeTopper,
         'Cake + Pastries Total (receipt)': c.cakePastries
       });
