@@ -398,16 +398,47 @@ let state = {
     { id: 'cat-topper', name: 'Topper', role: 'topper' },
     { id: 'cat-pastries', name: 'Pastries', role: 'pastries' }
   ],
-  products: [
-    { id: 'p1', name: 'CDC 8X12 2022', categoryId: 'cat-cake' },
-    { id: 'p2', name: 'CDC 10X12 2022', categoryId: 'cat-cake' },
-    { id: 'p3', name: 'GOLD HB TOPPER', categoryId: 'cat-topper' },
-    { id: 'p4', name: 'SILVER HB TOPPER', categoryId: 'cat-topper' },
-    { id: 'p5', name: 'CANDLE#7', categoryId: 'cat-pastries' }
-  ],
+  products: buildDefaultProducts(),
   receipts: [],
-  draft: null // in-progress parsed receipt awaiting review
+  draft: null, // in-progress parsed receipt awaiting review
+  historyFilter: 'combo' // 'combo' = only Cake+Topper / Cake+Pastries receipts, 'all' = every saved receipt
 };
+
+/* Seed product list, grouped by role. Only items in "cake", "topper" or
+   "pastries" ever contribute to the two tracked combinations — anything
+   else (bags, one-off freebies, etc.) is left out on purpose so it can
+   never accidentally count. Add/edit/remove any of these later from the
+   Products & Categories screen. */
+function buildDefaultProducts(){
+  const CAKE = [
+    'MDC ROUND','CDC ROUND','SCHDC ROUND','CADC ROUND','CMDC ROUND','SUCDC ROUND',
+    'CDC 8X12 2022','CDC 12X12 2022','CADC 8X12','CMDC 8X12','SCHDC 8X12','MDC8X12 2023',
+    'BF PETITE','BF 2024 JR','UC PETITE 2026','UC JR 2026','TCC PETITE','TCC REG',
+    'MDLC PETITE','MDLC REG','CBC REG','CBC PETITE','CBC JR.','CM REG',
+    'MOCRL-F','MCRL-F','TCRL-F 2025','TCRL-H 2025','CRL-F','BDM-F(RL)',
+    'MBC PETITE','MBC REG'
+  ];
+  const TOPPER = [
+    'GOLD HB TOPPER','SILVER HB TOPPER','CANDLE RED STK',
+    'CANDLE#1','CANDLE#2','CANDLE#3','CANDLE#4','CANDLE#5',
+    'HBDAY CANDLE'
+  ];
+  const PASTRIES = [
+    'BM','BM 5S','BM 9+1','ADD-ON BM 5S','UM','MM','MC-S','MC LF',
+    'ENS 2021','ENS 4S 2021','ENS 8S 2021',
+    'CHCS 2026','UMCS 2026','MMCS 2026','DDCS 2026','RVCS 2026','SCS 2026','CCS 2026','CPBCS 2026',
+    'ASD CS 5S 2025','ASD CS 8S 2025','ASMON PACK 5S','AS PBD 5S 2021',
+    'CHM 2019','UBENS','PVNAS 15S','PVNPE 8S','BUPT 10S',
+    'TAISAN LOAF','TAISAN SLC','MH20','FB','BCR'
+  ];
+  let n = 0;
+  const mk = (name, categoryId) => ({ id: 'p' + (++n), name, categoryId });
+  return [
+    ...CAKE.map(name => mk(name, 'cat-cake')),
+    ...TOPPER.map(name => mk(name, 'cat-topper')),
+    ...PASTRIES.map(name => mk(name, 'cat-pastries'))
+  ];
+}
 
 const SAMPLE_RECEIPT = `RR7024
 Sales INVOICE
@@ -476,7 +507,7 @@ function matchProduct(rawName){
   return bestScore >= 0.5 ? { product: best, score: bestScore } : { product: null, score: bestScore };
 }
 
-const IGNORE_KEYWORDS = /(TOTAL|SUBTOTAL|CASH\b|CHANGE|VAT|ITEM\(S\)|ITEMS\b|^PHP|TIN:|SI#|TRANS#|CASHIER|INVOICE|MIN#|ACCREDITATION|PTU#|^-{2,}|^={2,}|THANK|VISIT|ORDER YOUR|NEED ASSISTANCE|SCAN THE|SHARE YOUR|WE LOVE|WALTERMART|BAKESHOP|BULACAN|CUST NAME|ADDRESS:|DATE ISSUED|^RR\d|ZERO-RATED|VAT-EXEMPT|VATABLE)/i;
+const IGNORE_KEYWORDS = /(TOTAL|SUBTOTAL|CASH\b|CHANGE|VAT|ITEM\(S\)|ITEMS\b|^PHP|TIN:|SI#|TRANS#|CASHIER|INVOICE|MIN#|ACCREDITATION|PTU#|^-{2,}|^={2,}|THANK|VISIT|ORDER YOUR|NEED ASSISTANCE|SCAN THE|SHARE YOUR|WE LOVE|WALTERMART|BAKESHOP|BULACAN|CUST NAME|ADDRESS:|DATE ISSUED|^RR\d|ZERO-RATED|VAT-EXEMPT|VATABLE|CHRG INST|BOOKING ID|FOOD PANDA|GRAB FOOD|DEBIT CREDIT|^QR PH|REF NO|AUTH CODE|APPRCODE|CARD NO|LESS SC|LESS PWD|LESS EMP|LESS PROMO|APPROVED BY|TAKE-OUT|TAKE OUT|\bBOOKING\b)/i;
 
 const ITEM_REGEX = /^(\d+)\s+(.+?)\s+@\s*([\d,]+\.?\d*)\s+([\d,]+\.?\d*)\s*V?$/i;
 const FALLBACK_REGEX = /^(.+?)\s{2,}([\d,]+\.\d{2})\s*V?$/;
@@ -547,6 +578,38 @@ function parseReceiptText(text){
   });
 
   return { number, date: date || '', totalDue: totalDue || 0, items, rawText: text };
+}
+
+/* Split a block of pasted text containing MANY receipts back-to-back into
+   one chunk per receipt. We anchor on the "SI#" (Sales Invoice #) label,
+   which appears exactly once near the top of every PH-style POS receipt.
+   Trailing header noise (store name, POS/MIN numbers, etc.) that spills
+   into the next chunk is harmless — parseReceiptText() already ignores it
+   via IGNORE_KEYWORDS. If no "SI#" is found at all, the whole text is
+   treated as a single receipt (old behavior for one-at-a-time pasting). */
+function splitReceipts(text){
+  const parts = text.split(/(?=SI#\s*[\w-]+)/i).map(s => s.trim()).filter(Boolean);
+  return parts.length ? parts : [text.trim()].filter(Boolean);
+}
+
+/* Parse every receipt found in `text` and split the results into the ones
+   that actually qualify for a tracked combo (Cake+Topper or Cake+Pastries)
+   and the ones that don't (cake alone, pastries alone, unrecognized items,
+   etc.). This is the "only capture Cake+Pastry / Cake+Topper" behavior. */
+function bulkParseReceipts(text){
+  const chunks = splitReceipts(text);
+  const captured = [], skipped = [];
+  chunks.forEach(chunk => {
+    const parsed = parseReceiptText(chunk);
+    if (!parsed.items.length && !parsed.totalDue) return; // pure noise chunk, drop silently
+    const combos = computeCombosFromItems(parsed.items);
+    if (combos.cakeTopper > 0 || combos.cakePastries > 0) {
+      captured.push({ parsed, combos });
+    } else {
+      skipped.push({ parsed, combos });
+    }
+  });
+  return { captured, skipped };
 }
 
 function computeCombosFromItems(items){
@@ -658,18 +721,20 @@ function renderDashboard(main){
   document.getElementById('goAdd').addEventListener('click', () => { state.view = 'add'; render(); });
 
   const recentCard = wrap.querySelector('#recentCard');
-  const recent = state.receipts.slice(-6).reverse();
+  const qualifying = state.receipts
+    .map(r => ({ r, c: computeCombosFromItems(r.items) }))
+    .filter(({ c }) => c.cakeTopper > 0 || c.cakePastries > 0);
+  const recent = qualifying.slice(-6).reverse();
   if (!recent.length) {
-    recentCard.innerHTML = `<div class="empty"><h3>No receipts yet</h3><p>Paste your first receipt to see totals appear here.</p></div>`;
+    recentCard.innerHTML = `<div class="empty"><h3>No Cake+Topper or Cake+Pastries receipts yet</h3><p>Paste receipts (or Bulk Import a whole batch) to see qualifying totals appear here.</p></div>`;
     return;
   }
   recentCard.innerHTML = `
-    <h4 style="margin-bottom:14px;">Recent receipts</h4>
+    <h4 style="margin-bottom:14px;">Recent receipts <span style="font-weight:400; color:var(--ink-faint); font-size:12.5px;">(Cake+Topper / Cake+Pastries only)</span></h4>
     <table>
       <thead><tr><th>Receipt</th><th>Date</th><th class="num">Cake + Topper</th><th class="num">Cake + Pastries</th></tr></thead>
       <tbody>
-        ${recent.map(r => {
-          const c = computeCombosFromItems(r.items);
+        ${recent.map(({ r, c }) => {
           return `<tr><td class="mono">#${r.number}</td><td>${r.date || '\u2014'}</td>
             <td class="num">${peso(c.cakeTopper)}</td><td class="num">${peso(c.cakePastries)}</td></tr>`;
         }).join('')}
@@ -692,14 +757,17 @@ function renderAddReceipt(main){
     </div>
     <div class="card">
       <label class="field"><span>Raw receipt text</span>
-        <textarea id="rawInput" rows="12" placeholder="Paste receipt text here...">${state.draft ? state.draft.rawText : ''}</textarea>
+        <textarea id="rawInput" rows="12" placeholder="Paste one receipt, or paste a whole day's worth of receipts back-to-back &mdash; Bulk Import will split them automatically.">${state.draft ? state.draft.rawText : ''}</textarea>
       </label>
-      <div style="display:flex; gap:10px;">
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
         <button class="btn" id="parseBtn">Parse Receipt</button>
+        <button class="btn" id="bulkBtn" style="background:var(--sage);">Bulk Import (Cake+Topper / Cake+Pastries only)</button>
         <button class="btn secondary" id="sampleBtn">Load sample receipt</button>
         ${state.draft ? '<button class="btn secondary" id="clearBtn">Clear</button>' : ''}
       </div>
+      <p style="color:var(--ink-soft); font-size:13px; margin:10px 0 0;">Bulk Import splits pasted text into individual receipts, then saves <b>only</b> the ones that contain both a Cake item and a Topper, or both a Cake item and a Pastries item. Everything else is skipped automatically.</p>
     </div>
+    <div id="bulkResultArea"></div>
     <div id="reviewArea"></div>
   `;
   main.appendChild(wrap);
@@ -717,8 +785,45 @@ function renderAddReceipt(main){
     state.draft = parsed;
     render();
   });
+  document.getElementById('bulkBtn').addEventListener('click', () => {
+    const text = document.getElementById('rawInput').value;
+    if (!text.trim()) return;
+    const { captured, skipped } = bulkParseReceipts(text);
+    captured.forEach(({ parsed }) => {
+      state.receipts.push({
+        id: uid('rcpt'),
+        number: parsed.number,
+        date: parsed.date,
+        totalDue: parsed.totalDue,
+        rawText: parsed.rawText,
+        items: parsed.items
+      });
+    });
+    renderBulkResult(document.getElementById('bulkResultArea'), captured, skipped);
+  });
 
   if (state.draft) renderReview(document.getElementById('reviewArea'), state.draft);
+}
+
+function renderBulkResult(container, captured, skipped){
+  const cakeTopperCount = captured.filter(c => c.combos.cakeTopper > 0).length;
+  const cakePastriesCount = captured.filter(c => c.combos.cakePastries > 0).length;
+  container.innerHTML = `
+    <div class="card">
+      <h4 style="margin-bottom:10px;">Bulk import result</h4>
+      <div class="stat-row">
+        <div class="stat-mini"><div class="label">Receipts captured</div><div class="value">${captured.length}</div></div>
+        <div class="stat-mini"><div class="label">&mdash; with Cake+Topper</div><div class="value">${cakeTopperCount}</div></div>
+        <div class="stat-mini"><div class="label">&mdash; with Cake+Pastries</div><div class="value">${cakePastriesCount}</div></div>
+      </div>
+      <p style="color:var(--ink-soft); font-size:13.5px;">${skipped.length} receipt(s) were skipped &mdash; no Cake+Topper or Cake+Pastries combination found on them (e.g. pastries only, cake only, or unrecognized items).</p>
+      ${captured.length ? '<button class="btn" id="goHistoryFromBulk">View in Receipt History</button>' : ''}
+    </div>
+  `;
+  document.getElementById('goHistoryFromBulk')?.addEventListener('click', () => {
+    state.view = 'history';
+    render();
+  });
 }
 
 function renderReview(container, draft){
@@ -838,22 +943,41 @@ function renderHistory(main){
       </div>
       <button class="btn" id="goAdd2">+ Add Receipt</button>
     </div>
+    <div class="card" style="padding:14px 24px; margin-bottom:0;">
+      <label style="display:flex; align-items:center; gap:8px; font-size:13.5px; color:var(--ink-soft); cursor:pointer;">
+        <input type="checkbox" id="comboOnlyToggle" ${state.historyFilter === 'combo' ? 'checked' : ''} style="width:auto;">
+        Only show receipts with a Cake+Topper or Cake+Pastries combination
+      </label>
+    </div>
     <div class="card" id="historyCard"></div>
   `;
   main.appendChild(wrap);
   document.getElementById('goAdd2').addEventListener('click', () => { state.view = 'add'; render(); });
+  document.getElementById('comboOnlyToggle').addEventListener('change', e => {
+    state.historyFilter = e.target.checked ? 'combo' : 'all';
+    render();
+  });
 
   const card = wrap.querySelector('#historyCard');
   if (!state.receipts.length) {
     card.innerHTML = `<div class="empty"><h3>No receipts saved yet</h3><p>Add your first receipt to build history.</p></div>`;
     return;
   }
+
+  const rowsData = state.receipts
+    .map((r, idx) => ({ r, idx, c: computeCombosFromItems(r.items) }))
+    .filter(({ c }) => state.historyFilter !== 'combo' || c.cakeTopper > 0 || c.cakePastries > 0);
+
+  if (!rowsData.length) {
+    card.innerHTML = `<div class="empty"><h3>No Cake+Topper or Cake+Pastries receipts yet</h3><p>${state.receipts.length} receipt(s) saved, but none currently qualify. Uncheck the filter above to see all of them.</p></div>`;
+    return;
+  }
+
   card.innerHTML = `
     <table>
       <thead><tr><th>Receipt</th><th>Date</th><th class="num">Total</th><th class="num">Cake+Topper</th><th class="num">Cake+Pastries</th><th></th></tr></thead>
       <tbody>
-        ${state.receipts.map((r, idx) => {
-          const c = computeCombosFromItems(r.items);
+        ${rowsData.map(({ r, idx, c }) => {
           return `<tr>
             <td class="mono">#${r.number}</td>
             <td>${r.date || '\u2014'}</td>
@@ -1145,22 +1269,26 @@ function closeModal(){ document.getElementById('modalRoot').innerHTML = ''; }
    ========================================================= */
 function renderExport(main){
   const totals = allCombosTotal();
+  const qualifyingCount = state.receipts.filter(r => {
+    const c = computeCombosFromItems(r.items);
+    return c.cakeTopper > 0 || c.cakePastries > 0;
+  }).length;
   const wrap = document.createElement('div');
   wrap.innerHTML = `
     <div class="view-head">
       <div>
         <h1>Export</h1>
-        <p>Download every line item plus a running-totals summary as an Excel workbook.</p>
+        <p>Download every line item from Cake+Topper / Cake+Pastries receipts, plus a running-totals summary, as an Excel workbook.</p>
       </div>
     </div>
     <div class="card">
       <div class="stat-row">
-        <div class="stat-mini"><div class="label">Receipts</div><div class="value">${state.receipts.length}</div></div>
+        <div class="stat-mini"><div class="label">Qualifying receipts</div><div class="value">${qualifyingCount} / ${state.receipts.length}</div></div>
         <div class="stat-mini"><div class="label">Cake + Topper</div><div class="value">${peso(totals.cakeTopper)}</div></div>
         <div class="stat-mini"><div class="label">Cake + Pastries</div><div class="value">${peso(totals.cakePastries)}</div></div>
       </div>
-      <button class="btn" id="exportBtn" ${!state.receipts.length ? 'disabled' : ''}>Export to Excel (.xlsx)</button>
-      ${!state.receipts.length ? '<p style="color:var(--ink-faint); font-size:13px; margin-top:10px;">Add at least one receipt to enable export.</p>' : ''}
+      <button class="btn" id="exportBtn" ${!qualifyingCount ? 'disabled' : ''}>Export to Excel (.xlsx)</button>
+      ${!qualifyingCount ? '<p style="color:var(--ink-faint); font-size:13px; margin-top:10px;">No Cake+Topper or Cake+Pastries receipts yet &mdash; add or bulk import some first.</p>' : ''}
     </div>
 
     <div class="card">
@@ -1186,29 +1314,9 @@ function exportToExcel(){
   const rows = [];
   state.receipts.forEach(r => {
     const c = computeCombosFromItems(r.items);
-    // Skip this receipt entirely if it doesn't qualify for either combo
-    // (e.g. a receipt with only a cake and nothing else).
-    if (!c.cakeTopper && !c.cakePastries) return;
-
+    if (!(c.cakeTopper > 0 || c.cakePastries > 0)) return; // export only qualifying receipts
     r.items.forEach(it => {
       const cat = it.categoryId ? categoryById(it.categoryId) : null;
-      const role = cat ? cat.role : null;
-
-      // Only export rows that are actually part of a qualifying combo on
-      // THIS receipt. A cake row counts if either combo is present; a
-      // topper row only counts if Cake+Topper qualified; a pastries row
-      // only counts if Cake+Pastries qualified. Everything else on the
-      // receipt (drinks, boxes, unrelated items, etc.) is left out.
-      const include =
-        (role === 'cake' && (c.cakeTopper || c.cakePastries)) ||
-        (role === 'topper' && c.cakeTopper) ||
-        (role === 'pastries' && c.cakePastries);
-      if (!include) return;
-
-      const comboType = (c.cakeTopper && c.cakePastries)
-        ? 'Cake+Topper & Cake+Pastries'
-        : c.cakeTopper ? 'Cake+Topper' : 'Cake+Pastries';
-
       rows.push({
         'Receipt Number': r.number,
         'Receipt Date': r.date,
@@ -1217,7 +1325,6 @@ function exportToExcel(){
         'Quantity': it.qty,
         'Unit Price': it.unitPrice,
         'Product Total': it.total,
-        'Combo Type': comboType,
         'Cake + Topper Total (receipt)': c.cakeTopper,
         'Cake + Pastries Total (receipt)': c.cakePastries
       });
